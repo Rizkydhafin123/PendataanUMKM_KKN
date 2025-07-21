@@ -1,40 +1,35 @@
-import { umkmService, hasNeon } from "@/lib/db"
+import { umkmService } from "@/lib/db"
 import EditUMKMClient from "./EditUMKMClient"
+import { notFound } from "next/navigation"
 
-// generateStaticParams diperlukan untuk output: 'export' dengan rute dinamis
+// This function generates static paths for UMKM edit pages.
+// It's crucial for Next.js static export (output: 'export').
 export async function generateStaticParams() {
-  console.log("generateStaticParams: Starting...")
-  console.log("generateStaticParams: hasNeon =", hasNeon)
-
-  if (!hasNeon) {
-    console.warn(
-      "generateStaticParams: DATABASE_URL not set or Neon not configured. Returning dummy ID for static export.",
-    )
-    return [{ id: "dummy-id" }]
-  }
-
   try {
-    console.log("generateStaticParams: Attempting to fetch all UMKM from Neon DB.")
-    const allUmkm = await umkmService.getAll()
-    console.log(`generateStaticParams: Fetched ${allUmkm.length} UMKM items.`)
-
-    if (allUmkm.length === 0) {
-      console.log("generateStaticParams: No UMKM data found in DB. Returning dummy ID.")
-      return [{ id: "dummy-id" }]
-    }
-
-    const paths = allUmkm.map((umkm) => ({
-      id: umkm.id!,
-    }))
-    console.log("generateStaticParams: Generated paths:", paths)
-    return paths
+    const allUmkms = await umkmService.getAll()
+    const params = allUmkms.map((umkm) => ({ id: umkm.id.toString() }))
+    console.log("generateStaticParams: Generated paths:", params)
+    return params
   } catch (error) {
-    console.error("generateStaticParams: Error fetching UMKM for static params:", error)
-    return [{ id: "error-fallback-id" }]
+    console.error("generateStaticParams: Error fetching UMKM IDs:", error)
+    return []
   }
 }
 
-export default function EditUMKM() {
-  // EditUMKMClient akan menangani HeaderWithAuth dan NavigationWithAuth
-  return <EditUMKMClient />
+export default async function EditUMKMPage({ params }: { params: { id: string } }) {
+  const { id } = params
+  let umkmData = null
+
+  try {
+    umkmData = await umkmService.getById(id)
+    if (!umkmData) {
+      console.log(`EditUMKMPage: UMKM with ID ${id} not found.`)
+      notFound()
+    }
+  } catch (error) {
+    console.error(`EditUMKMPage: Error fetching UMKM with ID ${id}:`, error)
+    notFound()
+  }
+
+  return <EditUMKMClient initialUmkmData={umkmData} umkmId={id} />
 }
