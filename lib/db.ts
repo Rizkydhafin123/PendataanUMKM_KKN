@@ -1,311 +1,236 @@
-import { neon, type NeonQueryFunction } from "@neondatabase/serverless"
+import { neon, neonConfig } from "@neondatabase/serverless"
+import { createClient } from "@supabase/supabase-js" // Added: Import createClient
+import { validate as uuidValidate } from "uuid"
 
-/* ---------- CONFIG & FALLBACK ---------- */
-const DATABASE_URL = process.env.DATABASE_URL
-export const hasNeon = Boolean(DATABASE_URL)
+neonConfig.fetchConnectionCache = true
 
-/** Singleton Neon client */
-let _sql: NeonQueryFunction<false> | null = null
-function getDbClient(): NeonQueryFunction<false> {
-  if (!hasNeon) {
-    throw new Error("Neon database not configured. Please set DATABASE_URL environment variable.")
-  }
-  return (_sql ??= neon(DATABASE_URL!))
+const hasNeon = process.env.DATABASE_URL !== undefined
+
+// Initialize the database client based on environment
+const sql = hasNeon ? neon(process.env.DATABASE_URL!) : undefined
+
+// Supabase client initialization
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+
+let supabase: ReturnType<typeof createClient> | undefined
+
+if (supabaseUrl && supabaseAnonKey) {
+  supabase = createClient(supabaseUrl, supabaseAnonKey)
+} else {
+  console.warn("Supabase URL or Anon Key is not set. Supabase features will not work.")
 }
 
-/* ---------- TYPE ---------- */
-export interface UMKM {
-  id?: string
-  nama_usaha: string
-  pemilik: string
-  nik_pemilik?: string
-  no_hp?: string
-  alamat_usaha?: string
-  jenis_usaha: string
-  kategori_usaha?: string
-  deskripsi_usaha?: string
-  produk?: string
-  kapasitas_produksi?: number
-  satuan_produksi?: string
-  periode_operasi?: number
-  satuan_periode?: string
-  hari_kerja_per_minggu?: number
-  total_produksi?: number
-  rab?: number
-  biaya_tetap?: number
-  biaya_variabel?: number
-  modal_awal?: number
-  target_pendapatan?: number
-  jumlah_karyawan?: number
-  status: string
-  tanggal_daftar?: string
-  created_at?: string
-  updated_at?: string
-  user_id?: string
-}
-
-/** Cek apakah string adalah UUID valid */
-function isValidUUID(str: string | undefined | null): str is string {
-  return Boolean(str && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str))
-}
-
-/** Sync user ke database dengan error handling yang lebih baik */
-async function ensureUserExistsInDb(user: any): Promise<void> {
-  if (!hasNeon || !user || !isValidUUID(user.id)) return
-
-  try {
-    console.log("Checking if user exists in database:", user.id)
-    const sql = getDbClient()
-
-    const existingUsers = await sql`SELECT id FROM users WHERE id = ${user.id}`
-
-    if (existingUsers.length === 0) {
-      console.log("User not found, inserting to database:", user.id)
-      const userData: any = {
-        id: user.id,
-        username: user.username,
-        name: user.name || null,
-        role: user.role || "user",
-        rw: user.rw || null,
-        rt: user.rt || null,
-      }
-
-      await sql`
-        INSERT INTO users (id, username, name, role, rw, rt)
-        VALUES (
-          ${userData.id},
-          ${userData.username},
-          ${userData.name},
-          ${userData.role},
-          ${userData.rw},
-          ${userData.rt}
-        )
-        ON CONFLICT (id) DO NOTHING;
-      `
-      console.log("User successfully synced to database:", user.id)
-    } else {
-      console.log("User already exists in database:", user.id)
+// Mock database for local development without Neon
+const localStorageDB = {
+  umkms: typeof window !== "undefined" ? JSON.parse(localStorage.getItem("umkms") || "[]") : [],
+  users: typeof window !== "undefined" ? JSON.parse(localStorage.getItem("users") || "[]") : [],
+  save: function () {
+    if (typeof window !== "undefined") {
+      localStorage.setItem("umkms", JSON.stringify(this.umkms))
+      localStorage.setItem("users", JSON.stringify(this.users))
     }
-  } catch (error) {
-    console.error("Error syncing user to database:", error)
-  }
+  },
 }
 
-/* ---------- LOCAL STORAGE FALLBACK ---------- */
-const LS_KEY = "umkm"
-
-const ls = {
-  all(): UMKM[] {
-    if (typeof window === "undefined") return []
-    return JSON.parse(localStorage.getItem(LS_KEY) || "[]")
-  },
-  save(list: UMKM[]) {
-    if (typeof window !== "undefined") localStorage.setItem(LS_KEY, JSON.stringify(list))
-  },
+// Helper to check if a value is a valid UUID
+const isValidUUID = (uuid: string) => {
+  // Only validate UUID if Neon is active (meaning DATABASE_URL is set)
+  // If hasNeon is false, it means we are in a local dev environment without Neon DB,
+  // and userId can be anything (e.g., simple string IDs from localStorage).
+  // If hasNeon is true, it means we are using Neon DB, and userId must be a valid UUID.
+  return hasNeon ? uuidValidate(uuid) : true
 }
 
 export const umkmService = {
-  /** GET ALL */
-  async getAll(userId?: string, adminRW?: string): Promise<UMKM[]> {
-    console.log("getAll called with userId:", userId, "adminRW:", adminRW)
-
-    if (!hasNeon) {
-      console.log("Using localStorage fallback")
-      const allData = ls.all()
-      if (adminRW) {
-        const users = JSON.parse(localStorage.getItem("registered_users") || "[]")
-        const rwUsers = users.filter((u: any) => u.rw === adminRW).map((u: any) => u.id)
-        return allData.filter((item) => rwUsers.includes(item.user_id))
+  async getAll(userId?: string, rw?: string) {
+    if (hasNeon && sql) {
+      const query = userId
+        ? sql`SELECT * FROM umkms WHERE user_id = ${userId} ORDER BY created_at DESC`
+        : rw
+          ? sql`SELECT u.* FROM umkms u JOIN users usr ON u.user_id = usr.id WHERE usr.rw = ${rw} ORDER BY u.created_at DESC`
+          : sql`SELECT * FROM umkms ORDER BY u.created_at DESC`
+      const umkms = await query
+      return umkms.map((umkm) => ({
+        id: umkm.id,
+        nama_usaha: umkm.nama_usaha,
+        pemilik: umkm.pemilik,
+        jenis_usaha: umkm.jenis_usaha,
+        nomor_hp: umkm.nomor_hp,
+        status: umkm.status,
+        user_id: umkm.user_id,
+        created_at: umkm.created_at,
+        updated_at: umkm.updated_at,
+      }))
+    } else {
+      // LocalStorage logic
+      let filteredUmkms = localStorageDB.umkms
+      if (userId) {
+        filteredUmkms = filteredUmkms.filter((umkm: any) => umkm.user_id === userId)
+      } else if (rw) {
+        const usersInRw = localStorageDB.users.filter((user: any) => user.rw === rw)
+        const userIdsInRw = new Set(usersInRw.map((user: any) => user.id))
+        filteredUmkms = filteredUmkms.filter((umkm: any) => userIdsInRw.has(umkm.user_id))
       }
-      return userId ? allData.filter((item) => item.user_id === userId) : allData
-    }
-
-    try {
-      const sql = getDbClient()
-      let data: UMKM[] = []
-
-      if (adminRW) {
-        const rwUsers = await sql`SELECT id FROM users WHERE rw = ${adminRW}`
-        if (rwUsers.length > 0) {
-          const userIds = rwUsers.map((u) => u.id)
-          data = await sql`SELECT * FROM umkm WHERE user_id = ANY(${userIds}::uuid[]) ORDER BY created_at DESC`
-        }
-      } else if (userId && isValidUUID(userId)) {
-        data = await sql`SELECT * FROM umkm WHERE user_id = ${userId} ORDER BY created_at DESC`
-      } else {
-        // If no specific user or admin context, return empty
-        return []
-      }
-      return data as UMKM[]
-    } catch (error) {
-      console.error("Neon error in getAll:", error)
-      // Fallback ke localStorage
-      return ls.all()
+      return filteredUmkms.sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
     }
   },
 
-  /** CREATE */
-  async create(payload: Omit<UMKM, "id" | "created_at" | "updated_at">, userId: string): Promise<UMKM | null> {
-    console.log("create called with userId:", userId)
+  async getById(id: string) {
+    if (hasNeon && sql) {
+      const umkm = await sql`SELECT * FROM umkms WHERE id = ${id} LIMIT 1`
+      return umkm.length > 0
+        ? {
+            id: umkm[0].id,
+            nama_usaha: umkm[0].nama_usaha,
+            pemilik: umkm[0].pemilik,
+            jenis_usaha: umkm[0].jenis_usaha,
+            nomor_hp: umkm[0].nomor_hp,
+            status: umkm[0].status,
+            user_id: umkm[0].user_id,
+            created_at: umkm[0].created_at,
+            updated_at: umkm[0].updated_at,
+          }
+        : null
+    } else {
+      // LocalStorage logic
+      return localStorageDB.umkms.find((umkm: any) => umkm.id === id) || null
+    }
+  },
 
-    if (!isValidUUID(userId)) {
+  async create(umkmData: {
+    nama_usaha: string
+    pemilik: string
+    jenis_usaha: string
+    nomor_hp: string
+    status: string
+    userId: string
+  }) {
+    const { nama_usaha, pemilik, jenis_usaha, nomor_hp, status, userId } = umkmData
+
+    // Validate userId only if Neon is active
+    if (hasNeon && !isValidUUID(userId)) {
       throw new Error("User ID tidak valid")
     }
 
-    const dataWithUser = { ...payload, user_id: userId }
-
-    if (!hasNeon) {
-      console.log("Using localStorage for create")
-      const list = ls.all()
-      const newItem: UMKM = { ...dataWithUser, id: Date.now().toString() }
-      ls.save([newItem, ...list])
-      return newItem
-    }
-
-    try {
-      await ensureUserExistsInDb(JSON.parse(localStorage.getItem("auth_user") || "{}"))
-
-      const sql = getDbClient()
-      const [inserted] = await sql`
-        INSERT INTO umkm (
-          nama_usaha, pemilik, nik_pemilik, no_hp, alamat_usaha, jenis_usaha, kategori_usaha,
-          deskripsi_usaha, produk, kapasitas_produksi, satuan_produksi, periode_operasi,
-          satuan_periode, hari_kerja_per_minggu, total_produksi, rab, biaya_tetap,
-          biaya_variabel, modal_awal, target_pendapatan, jumlah_karyawan, status,
-          tanggal_daftar, user_id
-        ) VALUES (
-          ${dataWithUser.nama_usaha}, ${dataWithUser.pemilik}, ${dataWithUser.nik_pemilik || null},
-          ${dataWithUser.no_hp || null}, ${dataWithUser.alamat_usaha || null}, ${dataWithUser.jenis_usaha},
-          ${dataWithUser.kategori_usaha || null}, ${dataWithUser.deskripsi_usaha || null},
-          ${dataWithUser.produk || null}, ${dataWithUser.kapasitas_produksi || 0},
-          ${dataWithUser.satuan_produksi || null}, ${dataWithUser.periode_operasi || 0},
-          ${dataWithUser.satuan_periode || "bulan"}, ${dataWithUser.hari_kerja_per_minggu || 0},
-          ${dataWithUser.total_produksi || 0}, ${dataWithUser.rab || 0},
-          ${dataWithUser.biaya_tetap || 0}, ${dataWithUser.biaya_variabel || 0},
-          ${dataWithUser.modal_awal || 0}, ${dataWithUser.target_pendapatan || 0},
-          ${dataWithUser.jumlah_karyawan || 0}, ${dataWithUser.status},
-          ${dataWithUser.tanggal_daftar || new Date().toISOString()}, ${dataWithUser.user_id}
-        ) RETURNING *;
+    if (hasNeon && sql) {
+      const newUmkm = await sql`
+        INSERT INTO umkms (nama_usaha, pemilik, jenis_usaha, nomor_hp, status, user_id)
+        VALUES (${nama_usaha}, ${pemilik}, ${jenis_usaha}, ${nomor_hp}, ${status}, ${userId})
+        RETURNING *
       `
-      return inserted as UMKM
-    } catch (error) {
-      console.error("Neon error in create:", error)
-      // Fallback ke localStorage jika ada error
-      console.log("Falling back to localStorage due to error")
-      const list = ls.all()
-      const newItem: UMKM = { ...dataWithUser, id: Date.now().toString() }
-      ls.save([newItem, ...list])
-      return newItem
+      return {
+        id: newUmkm[0].id,
+        nama_usaha: newUmkm[0].nama_usaha,
+        pemilik: newUmkm[0].pemilik,
+        jenis_usaha: newUmkm[0].jenis_usaha,
+        nomor_hp: newUmkm[0].nomor_hp,
+        status: newUmkm[0].status,
+        user_id: newUmkm[0].user_id,
+        created_at: newUmkm[0].created_at,
+        updated_at: newUmkm[0].updated_at,
+      }
+    } else {
+      // LocalStorage logic
+      const newId = (
+        localStorageDB.umkms.length > 0 ? Math.max(...localStorageDB.umkms.map((u: any) => u.id)) + 1 : 1
+      ).toString()
+      const newUmkm = {
+        id: newId,
+        nama_usaha,
+        pemilik,
+        jenis_usaha,
+        nomor_hp,
+        status,
+        user_id: userId,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }
+      localStorageDB.umkms.push(newUmkm)
+      localStorageDB.save()
+      return newUmkm
     }
   },
 
-  /** UPDATE */
-  async update(id: string, payload: Partial<UMKM>, userId: string): Promise<UMKM | null> {
-    console.log("update called with userId:", userId)
+  async update(
+    id: string,
+    umkmData: {
+      nama_usaha?: string
+      pemilik?: string
+      jenis_usaha?: string
+      nomor_hp?: string
+      status?: string
+      userId?: string
+    },
+  ) {
+    const { nama_usaha, pemilik, jenis_usaha, nomor_hp, status, userId } = umkmData
 
-    if (!isValidUUID(userId)) {
+    // Validate userId only if Neon is active and userId is provided
+    if (hasNeon && userId && !isValidUUID(userId)) {
       throw new Error("User ID tidak valid")
     }
 
-    if (!hasNeon) {
-      const list = ls.all()
-      const itemIndex = list.findIndex((u) => u.id === id && u.user_id === userId)
-      if (itemIndex === -1) throw new Error("Data tidak ditemukan")
-
-      list[itemIndex] = { ...list[itemIndex], ...payload }
-      ls.save(list)
-      return list[itemIndex]
-    }
-
-    try {
-      const sql = getDbClient()
-      const [updated] = await sql`
-        UPDATE umkm SET
-          nama_usaha = ${payload.nama_usaha},
-          pemilik = ${payload.pemilik},
-          nik_pemilik = ${payload.nik_pemilik || null},
-          no_hp = ${payload.no_hp || null},
-          alamat_usaha = ${payload.alamat_usaha || null},
-          jenis_usaha = ${payload.jenis_usaha},
-          kategori_usaha = ${payload.kategori_usaha || null},
-          deskripsi_usaha = ${payload.deskripsi_usaha || null},
-          produk = ${payload.produk || null},
-          kapasitas_produksi = ${payload.kapasitas_produksi || 0},
-          satuan_produksi = ${payload.satuan_produksi || null},
-          periode_operasi = ${payload.periode_operasi || 0},
-          satuan_periode = ${payload.satuan_periode || "bulan"},
-          hari_kerja_per_minggu = ${payload.hari_kerja_per_minggu || 0},
-          total_produksi = ${payload.total_produksi || 0},
-          rab = ${payload.rab || 0},
-          biaya_tetap = ${payload.biaya_tetap || 0},
-          biaya_variabel = ${payload.biaya_variabel || 0},
-          modal_awal = ${payload.modal_awal || 0},
-          target_pendapatan = ${payload.target_pendapatan || 0},
-          jumlah_karyawan = ${payload.jumlah_karyawan || 0},
-          status = ${payload.status},
+    if (hasNeon && sql) {
+      const updatedUmkm = await sql`
+        UPDATE umkms
+        SET
+          nama_usaha = COALESCE(${nama_usaha || null}, nama_usaha),
+          pemilik = COALESCE(${pemilik || null}, pemilik),
+          jenis_usaha = COALESCE(${jenis_usaha || null}, jenis_usaha),
+          nomor_hp = COALESCE(${nomor_hp || null}, nomor_hp),
+          status = COALESCE(${status || null}, status),
+          user_id = COALESCE(${userId || null}, user_id),
           updated_at = NOW()
-        WHERE id = ${id} AND user_id = ${userId}
-        RETURNING *;
+        WHERE id = ${id}
+        RETURNING *
       `
-      return updated as UMKM
-    } catch (error) {
-      console.error("Neon error in update:", error)
-      throw error
-    }
-  },
-
-  /** DELETE */
-  async delete(id: string, userId: string): Promise<boolean> {
-    console.log("delete called with userId:", userId)
-
-    if (!isValidUUID(userId)) {
-      throw new Error("User ID tidak valid")
-    }
-
-    if (!hasNeon) {
-      const list = ls.all()
-      const filteredList = list.filter((u) => !(u.id === id && u.user_id === userId))
-      if (filteredList.length === list.length) {
-        throw new Error("Data tidak ditemukan")
+      return updatedUmkm.length > 0
+        ? {
+            id: updatedUmkm[0].id,
+            nama_usaha: updatedUmkm[0].nama_usaha,
+            pemilik: updatedUmkm[0].pemilik,
+            jenis_usaha: updatedUmkm[0].jenis_usaha,
+            nomor_hp: updatedUmkm[0].nomor_hp,
+            status: updatedUmkm[0].status,
+            user_id: updatedUmkm[0].user_id,
+            created_at: updatedUmkm[0].created_at,
+            updated_at: updatedUmkm[0].updated_at,
+          }
+        : null
+    } else {
+      // LocalStorage logic
+      const index = localStorageDB.umkms.findIndex((umkm: any) => umkm.id === id)
+      if (index !== -1) {
+        const updated = {
+          ...localStorageDB.umkms[index],
+          ...umkmData,
+          updated_at: new Date().toISOString(),
+        }
+        localStorageDB.umkms[index] = updated
+        localStorageDB.save()
+        return updated
       }
-      ls.save(filteredList)
-      return true
-    }
-
-    try {
-      const sql = getDbClient()
-      const result = await sql`DELETE FROM umkm WHERE id = ${id} AND user_id = ${userId};`
-      return result.count > 0
-    } catch (error) {
-      console.error("Neon error in delete:", error)
-      throw error
-    }
-  },
-
-  /** GET BY ID */
-  async getById(id: string, userId?: string): Promise<UMKM | null> {
-    console.log("getById called with userId:", userId)
-
-    if (!hasNeon) {
-      const item = ls.all().find((u) => u.id === id)
-      if (userId && item && item.user_id !== userId) {
-        return null
-      }
-      return item || null
-    }
-
-    try {
-      const sql = getDbClient()
-      let data: UMKM[] = []
-      if (userId && isValidUUID(userId)) {
-        data = await sql`SELECT * FROM umkm WHERE id = ${id} AND user_id = ${userId}`
-      } else {
-        data = await sql`SELECT * FROM umkm WHERE id = ${id}`
-      }
-      return data.length > 0 ? (data[0] as UMKM) : null
-    } catch (error) {
-      console.error("Neon error in getById:", error)
       return null
     }
   },
+
+  async delete(id: string) {
+    if (hasNeon && sql) {
+      const deletedUmkm = await sql`
+        DELETE FROM umkms
+        WHERE id = ${id}
+        RETURNING *
+      `
+      return deletedUmkm.length > 0
+    } else {
+      // LocalStorage logic
+      const initialLength = localStorageDB.umkms.length
+      localStorageDB.umkms = localStorageDB.umkms.filter((umkm: any) => umkm.id !== id)
+      localStorageDB.save()
+      return localStorageDB.umkms.length < initialLength
+    }
+  },
 }
+
+// Export the client for direct use if needed (e.g., in server actions)
+export { sql, hasNeon, localStorageDB, supabase } // Added: Export supabase client
